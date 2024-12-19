@@ -486,13 +486,18 @@ type DirInfo struct {
 type ReadFileReq struct {
 	DirId int64
 	vei   string
+	Page  int
 }
 
 func (r ReadFileReq) Values() url.Values {
+	if r.Page == 0 {
+		r.Page = 1
+	}
 	return url.Values{
 		"task":      []string{"5"},
 		"folder_id": []string{strconv.FormatInt(r.DirId, 10)},
 		"vei":       []string{r.vei},
+		"pg":        []string{strconv.Itoa(r.Page)},
 	}
 }
 
@@ -506,6 +511,7 @@ func (r ReadSubDirReq) Values() url.Values {
 		"task":      []string{"47"},
 		"folder_id": []string{strconv.FormatInt(r.DirId, 10)},
 		"vei":       []string{r.vei},
+		//"pg":        []string{strconv.Itoa(r.Page)},
 	}
 }
 
@@ -597,7 +603,6 @@ func (c *Client) getDownPage(u string) ([]byte, error) {
 	req.Header.Add("sec-fetch-user", "?1")
 	req.Header.Add("upgrade-insecure-requests", "1")
 	req.Header.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	//req.Header.Add("Cookie", "codelen=1; pc_ad1=1")
 	res, err := c.htpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -713,7 +718,6 @@ func getLanRealDown(pageUrl string) (string, error) {
 	req.Header.Add("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
 	req.Header.Add("accept-language", "zh-CN,zh;q=0.9")
 	req.Header.Add("cache-control", "no-cache")
-	//req.Header.Add("cookie", "codelen=1; Hm_lvt_fb7e760e987871d56396999d288238a4=1734582425; HMACCOUNT=232C742A38316425; uz_distinctid=193dd2b584bc5a-00b9cc741d1317-26011851-130980-193dd2b584c10a6; STDATA82=czst_eid%3D62426063-3821-%26ntime%3D3821; pc_ad1=1; Hm_lpvt_fb7e760e987871d56396999d288238a4=1734595884; codelen=1; pc_ad1=1")
 	req.Header.Add("pragma", "no-cache")
 	req.Header.Add("priority", "u=0, i")
 	req.Header.Add("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
@@ -776,7 +780,6 @@ func downAjax(domain, path string, data string) (string, error) {
 	req.Header.Add("accept-language", "zh-CN,zh;q=0.9")
 	req.Header.Add("cache-control", "no-cache")
 	req.Header.Add("content-type", "application/x-www-form-urlencoded")
-	//req.Header.Add("cookie", "codelen=1; Hm_lvt_fb7e760e987871d56396999d288238a4=1734582425; HMACCOUNT=232C742A38316425; uz_distinctid=193dd2b584bc5a-00b9cc741d1317-26011851-130980-193dd2b584c10a6; STDATA82=czst_eid%3D62426063-3821-%26ntime%3D3821; pc_ad1=1; Hm_lpvt_fb7e760e987871d56396999d288238a4=1734596612; codelen=1; pc_ad1=1")
 	req.Header.Add("origin", "https://wwrq.lanzouu.com")
 	req.Header.Add("pragma", "no-cache")
 	req.Header.Add("priority", "u=1, i")
