@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/yeyudekuangxiang/common-go/tool/httptool"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path"
@@ -19,45 +22,131 @@ import (
 )
 
 type Client struct {
-	cookieStr   string
-	htpClient   http.Client
-	domain      string
+	htpClient   *httptool.HttpClient
 	uid         string
 	vei         string
 	lastVeiTime *time.Time
 	lock        sync.Mutex
 }
 
-func NewClient(domain, cookie string) (*Client, error) {
-	reg, err := regexp.Compile(`ylogin=(\d+);`)
+const Domain = "https://up.woozooo.com/"
+const CookieDomain = "woozooo.com"
+
+func NewClient() (*Client, error) {
+	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
 	}
-	list := reg.FindStringSubmatch(cookie)
-	if len(list) != 2 {
-		return nil, errors.New("not found uid")
+	client := &http.Client{
+		Jar:     jar,
+		Timeout: time.Minute * 5,
 	}
+	logger := httptool.WithLogger(httptool.FuncLogger(func(data httptool.LogData, err error) {
+
+	}))
 	return &Client{
-		domain:    domain,
-		cookieStr: cookie,
-		uid:       list[1],
+		htpClient: httptool.NewHttpClient(client, logger),
 	}, nil
 }
-func (c *Client) SetCookie(cookie string) error {
-	reg, err := regexp.Compile(`ylogin=(\d+);`)
+
+// Login 淘宝滑动验证码未解决
+func (c *Client) Login(phone, password string) error {
+	body, err := c.htpClient.Get("https://up.woozooo.com/account.php?action=login")
 	if err != nil {
 		return err
 	}
-	list := reg.FindStringSubmatch(cookie)
-	if len(list) != 2 {
-		return errors.New("not found uid")
+	getFormValue := func(name string) (string, error) {
+		reg, err := regexp.Compile(fmt.Sprintf(`<input.*?name="%s".*?value="(.*)".*?>`, name))
+		if err != nil {
+			return "", err
+		}
+		matchList := reg.FindStringSubmatch(string(body))
+		if len(matchList) != 2 {
+			return "", nil
+		}
+		return matchList[1], nil
 	}
-	c.uid = list[1]
-	c.cookieStr = cookie
+	action, err := getFormValue("action")
+	if err != nil {
+		return err
+	}
+	task, err := getFormValue("task")
+	if err != nil {
+		return err
+	}
+	ref, err := getFormValue("ref")
+	if err != nil {
+		return err
+	}
+	setSessionId, err := getFormValue("setSessionId")
+	if err != nil {
+		return err
+	}
+	setToken, err := getFormValue("setToken")
+	if err != nil {
+		return err
+	}
+	setSig, err := getFormValue("setSig")
+	if err != nil {
+		return err
+	}
+	setScene, err := getFormValue("setScene")
+	if err != nil {
+		return err
+	}
+	formhash, err := getFormValue("formhash")
+	if err != nil {
+		return err
+	}
+
+	info := url.Values{
+		"action":       {action},
+		"task":         {task},
+		"ref":          {ref},
+		"setSessionId": {setSessionId},
+		"setToken":     {setToken},
+		"setSig":       {setSig},
+		"setScene":     {setScene},
+		"formhash":     {formhash},
+		"username":     {phone},
+		"password":     {password},
+	}
+
+	result, err := c.htpClient.OriginForm("https://up.woozooo.com/account.php", "POST", []byte(info.Encode()))
+	if err != nil {
+		return err
+	}
+	scs := result.Response.Header.Values("Set-Cookie")
+	for _, sc := range scs {
+		parts := strings.Split(sc, "=")
+		if parts[0] == "ylogin" {
+			parts2 := strings.Split(parts[1], ";")
+			c.uid = strings.TrimSpace(parts2[0])
+			break
+		}
+	}
+	return nil
+}
+func (c *Client) SetCookie(cookieStr string) error {
+	cks, err := http.ParseCookie(cookieStr)
+	if err != nil {
+		return err
+	}
+	for _, ck := range cks {
+		ck.Domain = CookieDomain
+		if ck.Name == "ylogin" {
+			c.uid = ck.Value
+		}
+	}
+	uInfo, err := url.Parse(Domain)
+	if err != nil {
+		return err
+	}
+	c.htpClient.GetClient().Jar.SetCookies(uInfo, cks)
 	return nil
 }
 func (c *Client) Mkdir(req MkdirReq) (*MkdirResp, error) {
-	body, err := c.postForm(c.domain+"/doupload.php?uid="+c.uid, req)
+	body, err := c.postForm(Domain+"/doupload.php?uid="+c.uid, req)
 	if err != nil {
 		return nil, err
 	}
@@ -71,32 +160,36 @@ func (c *Client) Mkdir(req MkdirReq) (*MkdirResp, error) {
 		Info: convert2string(resp.Info),
 	}, nil
 }
+
+// ReadSubDir 获取文件夹列表
 func (c *Client) ReadSubDir(req ReadSubDirReq) (*ReadSubDirResp, error) {
 	vei, err := c.getVei()
 	if err != nil {
 		return nil, err
 	}
 	req.vei = vei
-	body, err := c.postForm(c.domain+"/doupload.php?uid="+c.uid, req)
+	body, err := c.postForm(Domain+"/doupload.php?uid="+c.uid, req)
 	if err != nil {
 		return nil, err
 	}
 	return jsonUnmarshal[ReadSubDirResp](body)
 }
+
+// ReadFile 获取文件列表
 func (c *Client) ReadFile(req ReadFileReq) (*ReadFileResp, error) {
 	vei, err := c.getVei()
 	if err != nil {
 		return nil, err
 	}
 	req.vei = vei
-	body, err := c.postForm(c.domain+"/doupload.php?uid="+c.uid, req)
+	body, err := c.postForm(Domain+"/doupload.php?uid="+c.uid, req)
 	if err != nil {
 		return nil, err
 	}
 	return jsonUnmarshal[ReadFileResp](body)
 }
 func (c *Client) ShareInfo(req ShareInfoReq) (*ShareInfoResp, error) {
-	body, err := c.postForm(c.domain+"/doupload.php", req)
+	body, err := c.postForm(Domain+"/doupload.php", req)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +206,7 @@ func (c *Client) DownInfo(fileId int64) (*DownInfoResp, error) {
 	if shareInfoResp.Zt != 1 {
 		return nil, fmt.Errorf("获取分享连接失败%v", shareInfoResp)
 	}
-	if strings.Contains(shareInfoResp.Info.IsNewd, "lanzouu.com") {
+	/*if strings.Contains(shareInfoResp.Info.IsNewd, "lanzouu.com") {
 		uuu, err := getLanRealDown(fmt.Sprintf("%s/%s", shareInfoResp.Info.IsNewd, shareInfoResp.Info.FId))
 		if err != nil {
 			return nil, err
@@ -129,26 +222,45 @@ func (c *Client) DownInfo(fileId int64) (*DownInfoResp, error) {
 			Inf: "",
 		}, nil
 	}
+	*/
+	//获取下载连接
+	return c.DownInfoByShareLink(fmt.Sprintf("%s/%s", shareInfoResp.Info.IsNewd, shareInfoResp.Info.FId), shareInfoResp.Info.Pwd)
+}
+func (c *Client) DownInfoByShareLink(shareLink string, pwd string) (*DownInfoResp, error) {
 	// 获取分享页面
-	body, err := c.getDownPage(fmt.Sprintf("%s/%s", shareInfoResp.Info.IsNewd, shareInfoResp.Info.FId))
+	body, err := c.getDownPage(shareLink)
 	if err != nil {
 		return nil, err
 	}
-	reg, err := regexp.Compile(`skdklds.*?=.*?'(.*)'`)
+	reg, err := regexp.Compile(`downprocess(.*?)sign':'(.*?)'`)
 	if err != nil {
 		return nil, err
 	}
-	list := reg.FindStringSubmatch(string(body))
-	if len(list) != 2 {
+	list := reg.FindAllStringSubmatch(string(body), -1)
+	if len(list) != 3 {
 		return nil, errors.New("未获取到签名")
 	}
+	sign := list[1][2]
+	// 获取id
+	reg, err = regexp.Compile(`ajaxm.php?file=(.*?)'`)
+	if err != nil {
+		return nil, err
+	}
+	list2 := reg.FindStringSubmatch(string(body))
+	if len(list2) != 2 {
+		return nil, errors.New("未获取到文件id")
+	}
+	fileId, err := strconv.ParseInt(list2[1], 10, 64)
+	if err != nil {
+		return nil, err
+	}
 	//获取下载连接
-	return c.DownInfoBySign(fileId, list[1], shareInfoResp.Info.Pwd)
+	return c.downInfoBySign(fileId, sign, pwd)
 }
 func (c *Client) getVei() (string, error) {
 	c.lock.Lock()
 	if c.lastVeiTime == nil || time.Now().Sub(*c.lastVeiTime).Seconds() > 3600 {
-		body, err := c.get(fmt.Sprintf("%s/mydisk.php?item=files&action=index&u=%s", c.domain, c.uid))
+		body, err := c.get(fmt.Sprintf("%s/mydisk.php?item=files&action=index&u=%s", Domain, c.uid))
 		if err != nil {
 			return "", err
 		}
@@ -237,7 +349,7 @@ var mimeMap = map[string]string{
 	"cfg":          "text/plain",                              // Configuration File
 }
 
-func (c *Client) UploadFile(filepath string, dirId int64) (*UploadFileResp, error) {
+func (c *Client) UploadFile(filepath string, dirId string) (*UploadFileResp, error) {
 	ext := strings.TrimLeft(path.Ext(filepath), ".")
 	mime, ok := mimeMap[ext]
 	if !ok {
@@ -276,7 +388,7 @@ func (c *Client) UploadFile(filepath string, dirId int64) (*UploadFileResp, erro
 	_ = writer.WriteField("type", mime)
 	_ = writer.WriteField("lastModifiedDate", modTime)
 	_ = writer.WriteField("size", "218025")
-	_ = writer.WriteField("folder_id_bb_n", strconv.FormatInt(dirId, 10))
+	_ = writer.WriteField("folder_id_bb_n", dirId)
 
 	part10, errFile10 := writer.CreateFormFile("upload_file", filepath)
 	_, errFile10 = io.Copy(part10, file)
@@ -288,25 +400,13 @@ func (c *Client) UploadFile(filepath string, dirId int64) (*UploadFileResp, erro
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", c.domain+"/html5up.php", payload)
-	if err != nil {
-		return nil, err
-	}
-	c.fillHeader(req)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	res, err := c.htpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-
-	body, err := io.ReadAll(res.Body)
+	body, err := c.htpClient.Post(Domain+"/html5up.php", writer.FormDataContentType(), payload, c.fillHeader())
 	if err != nil {
 		return nil, err
 	}
 	return jsonUnmarshal[UploadFileResp](body)
 }
-func (c *Client) UploadFileFromReader(file io.Reader, fileName string, dirId int64) (*UploadFileResp, error) {
+func (c *Client) UploadFileFromReader(file io.Reader, fileName string, dirId string) (*UploadFileResp, error) {
 	ext := strings.TrimLeft(path.Ext(fileName), ".")
 	mime, ok := mimeMap[ext]
 	if !ok {
@@ -335,7 +435,7 @@ func (c *Client) UploadFileFromReader(file io.Reader, fileName string, dirId int
 	_ = writer.WriteField("type", mime)
 	_ = writer.WriteField("lastModifiedDate", modTime)
 	_ = writer.WriteField("size", "218025")
-	_ = writer.WriteField("folder_id_bb_n", strconv.FormatInt(dirId, 10))
+	_ = writer.WriteField("folder_id_bb_n", dirId)
 
 	part10, errFile10 := writer.CreateFormFile("upload_file", path.Base(fileName))
 	_, errFile10 = io.Copy(part10, file)
@@ -347,37 +447,20 @@ func (c *Client) UploadFileFromReader(file io.Reader, fileName string, dirId int
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", c.domain+"/html5up.php", payload)
+	body, err := c.htpClient.Post(Domain+"/html5up.php", writer.FormDataContentType(), payload, c.fillHeader())
 	if err != nil {
 		return nil, err
 	}
-	c.fillHeader(req)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	res, err := c.htpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
 
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
 	return jsonUnmarshal[UploadFileResp](body)
 }
 func (c *Client) get(u string) ([]byte, error) {
-	req, err := http.NewRequest("GET", u, nil)
+	opt := httptool.HttpWithHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	body, err := c.htpClient.Get(u, c.fillHeader(), opt)
 	if err != nil {
 		return nil, err
 	}
-	c.fillHeader(req)
-	req.Header.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-	resp, err := c.htpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	return body, nil
 }
 func convert2string(v interface{}) string {
 	switch vv := v.(type) {
@@ -406,41 +489,31 @@ func jsonUnmarshal[T any](data []byte) (*T, error) {
 	}
 	return &v, nil
 }
-func (c *Client) fillHeader(req *http.Request) {
-	req.Header.Set("Cookie", c.cookieStr)
-	req.Header.Add("accept", "application/json, text/javascript, */*; q=0.01")
-	req.Header.Add("accept-language", "zh-CN,zh;q=0.9")
-	req.Header.Add("cache-control", "no-cache")
-	req.Header.Add("origin", "https://pc.woozooo.com")
-	req.Header.Add("pragma", "no-cache")
-	req.Header.Add("priority", "u=1, i")
-	req.Header.Add("referer", "https://pc.woozooo.com/mydisk.php?item=files&action=index&u=4252785")
-	req.Header.Add("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
-	req.Header.Add("sec-ch-ua-mobile", "?0")
-	req.Header.Add("sec-ch-ua-platform", "\"Windows\"")
-	req.Header.Add("sec-fetch-dest", "empty")
-	req.Header.Add("sec-fetch-mode", "cors")
-	req.Header.Add("sec-fetch-site", "same-origin")
-	req.Header.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	req.Header.Add("x-requested-with", "XMLHttpRequest")
+func (c *Client) fillHeader() httptool.RequestOption {
+	return func(req *http.Request) {
+		req.Header.Add("accept", "application/json, text/javascript, */*; q=0.01")
+		req.Header.Add("accept-language", "zh-CN,zh;q=0.9")
+		req.Header.Add("cache-control", "no-cache")
+		req.Header.Add("origin", "https://pc.woozooo.com")
+		req.Header.Add("pragma", "no-cache")
+		req.Header.Add("priority", "u=1, i")
+		req.Header.Add("referer", "https://pc.woozooo.com/mydisk.php?item=files&action=index&u=4252785")
+		req.Header.Add("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+		req.Header.Add("sec-ch-ua-mobile", "?0")
+		req.Header.Add("sec-ch-ua-platform", "\"Windows\"")
+		req.Header.Add("sec-fetch-dest", "empty")
+		req.Header.Add("sec-fetch-mode", "cors")
+		req.Header.Add("sec-fetch-site", "same-origin")
+		req.Header.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+		req.Header.Add("x-requested-with", "XMLHttpRequest")
+	}
 }
 func (c *Client) postForm(u string, vals IFormValue) ([]byte, error) {
-	req, err := http.NewRequest("POST", u, strings.NewReader(vals.Values().Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	c.fillHeader(req)
-	resp, err := c.htpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	return c.htpClient.PostFrom(u, vals.Values())
 }
 
 type MkdirReq struct {
-	ParentId          int64
+	ParentId          string
 	FolderName        string
 	FolderDescription string
 }
@@ -448,7 +521,7 @@ type MkdirReq struct {
 func (m MkdirReq) Values() url.Values {
 	return url.Values{
 		"task":               []string{"2"},
-		"parent_id":          []string{strconv.FormatInt(m.ParentId, 10)},
+		"parent_id":          []string{m.ParentId},
 		"folder_name":        []string{m.FolderName},
 		"folder_description": []string{m.FolderDescription},
 	}
@@ -469,7 +542,7 @@ type ReadSubDirResp struct {
 	Info []struct {
 		Name      string `json:"name"`
 		FolderDes string `json:"folder_des"`
-		Folderid  int    `json:"folderid"`
+		Folderid  int64  `json:"folderid"`
 		Now       int    `json:"now"`
 	} `json:"info"`
 	Text []DirInfo `json:"text"`
@@ -502,14 +575,14 @@ func (r ReadFileReq) Values() url.Values {
 }
 
 type ReadSubDirReq struct {
-	DirId int64
+	DirId string
 	vei   string
 }
 
 func (r ReadSubDirReq) Values() url.Values {
 	return url.Values{
 		"task":      []string{"47"},
-		"folder_id": []string{strconv.FormatInt(r.DirId, 10)},
+		"folder_id": []string{r.DirId},
 		"vei":       []string{r.vei},
 		//"pg":        []string{strconv.Itoa(r.Page)},
 	}
@@ -577,78 +650,111 @@ type ShareInfoResp struct {
 }
 type DownInfoResp struct {
 	Zt  int    `json:"zt"`
-	Dom string `json:"dom"`
-	Url string `json:"url"`
+	Dom string `json:"dom"` //下载的域名和路径 Dom和Url拼接起来为下载路径
+	Url string `json:"url"` // 下载的参数
 	Inf string `json:"inf"`
 }
 
 func (c *Client) getDownPage(u string) ([]byte, error) {
-	method := "GET"
-	req, err := http.NewRequest(method, u, nil)
-
-	if err != nil {
-		return nil, err
+	opt := func(req *http.Request) {
+		req.Header.Add("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+		req.Header.Add("accept-language", "zh-CN,zh;q=0.9")
+		req.Header.Add("cache-control", "no-cache")
+		req.Header.Add("pragma", "no-cache")
+		req.Header.Add("priority", "u=0, i")
+		req.Header.Add("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+		req.Header.Add("sec-ch-ua-mobile", "?0")
+		req.Header.Add("sec-ch-ua-platform", "\"Windows\"")
+		req.Header.Add("sec-fetch-dest", "document")
+		req.Header.Add("sec-fetch-mode", "navigate")
+		req.Header.Add("sec-fetch-site", "none")
+		req.Header.Add("sec-fetch-user", "?1")
+		req.Header.Add("upgrade-insecure-requests", "1")
+		req.Header.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 	}
-	req.Header.Add("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-	req.Header.Add("accept-language", "zh-CN,zh;q=0.9")
-	req.Header.Add("cache-control", "no-cache")
-	req.Header.Add("pragma", "no-cache")
-	req.Header.Add("priority", "u=0, i")
-	req.Header.Add("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
-	req.Header.Add("sec-ch-ua-mobile", "?0")
-	req.Header.Add("sec-ch-ua-platform", "\"Windows\"")
-	req.Header.Add("sec-fetch-dest", "document")
-	req.Header.Add("sec-fetch-mode", "navigate")
-	req.Header.Add("sec-fetch-site", "none")
-	req.Header.Add("sec-fetch-user", "?1")
-	req.Header.Add("upgrade-insecure-requests", "1")
-	req.Header.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	res, err := c.htpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	return io.ReadAll(res.Body)
+	return c.htpClient.Get(u, opt)
 }
-func (c *Client) DownInfoBySign(fileId int64, skdklds string, pwd string) (*DownInfoResp, error) {
+func (c *Client) downInfoBySign(fileId int64, skdklds string, pwd string) (*DownInfoResp, error) {
 	u := fmt.Sprintf("https://wwrq.lanzouu.com/ajaxm.php?file=%d", fileId)
-	method := "POST"
-
 	payload := strings.NewReader(fmt.Sprintf("action=downprocess&sign=%s&p=%s&kd=1", skdklds, pwd))
 
-	req, err := http.NewRequest(method, u, payload)
+	opt := func(req *http.Request) {
+		req.Header.Add("accept", "application/json, text/javascript, */*")
+		req.Header.Add("accept-language", "zh-CN,zh;q=0.9")
+		req.Header.Add("cache-control", "no-cache")
+		req.Header.Add("content-type", "application/x-www-form-urlencoded")
+		req.Header.Add("origin", "https://wwrq.lanzouu.com")
+		req.Header.Add("pragma", "no-cache")
+		req.Header.Add("priority", "u=1, i")
+		req.Header.Add("referer", "https://wwrq.lanzouu.com/ijako2ii6xjc")
+		req.Header.Add("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+		req.Header.Add("sec-ch-ua-mobile", "?0")
+		req.Header.Add("sec-ch-ua-platform", "\"Windows\"")
+		req.Header.Add("sec-fetch-dest", "empty")
+		req.Header.Add("sec-fetch-mode", "cors")
+		req.Header.Add("sec-fetch-site", "same-origin")
+		req.Header.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+		req.Header.Add("x-requested-with", "XMLHttpRequest")
+	}
 
+	req, err := http.NewRequest("POST", u, payload)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Add("accept", "application/json, text/javascript, */*")
-	req.Header.Add("accept-language", "zh-CN,zh;q=0.9")
-	req.Header.Add("cache-control", "no-cache")
-	req.Header.Add("content-type", "application/x-www-form-urlencoded")
-	req.Header.Add("origin", "https://wwrq.lanzouu.com")
-	req.Header.Add("pragma", "no-cache")
-	req.Header.Add("priority", "u=1, i")
-	req.Header.Add("referer", "https://wwrq.lanzouu.com/ijako2ii6xjc")
-	req.Header.Add("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
-	req.Header.Add("sec-ch-ua-mobile", "?0")
-	req.Header.Add("sec-ch-ua-platform", "\"Windows\"")
-	req.Header.Add("sec-fetch-dest", "empty")
-	req.Header.Add("sec-fetch-mode", "cors")
-	req.Header.Add("sec-fetch-site", "same-origin")
-	req.Header.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	req.Header.Add("x-requested-with", "XMLHttpRequest")
-
-	res, err := c.htpClient.Do(req)
+	opt(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
-
-	body, err := io.ReadAll(res.Body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		log.Println(string(b))
+		return nil, errors.New(resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	//body, err := c.htpClient.Post(u, "application/x-www-form-urlencoded", payload, opt)
 	if err != nil {
 		return nil, err
 	}
+
 	return jsonUnmarshal[DownInfoResp](body)
+}
+func (c *Client) SetProxy(proxyUrl string) error {
+	return c.htpClient.SetProxy(proxyUrl)
+}
+func (c *Client) Down(downLink string) ([]byte, error) {
+	req, err := http.NewRequest("GET", downLink, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Add("Accept-Language", "zh-CN,zh;q=0.9,ja;q=0.8,be;q=0.7")
+	req.Header.Add("Cache-Control", "no-cache")
+	req.Header.Add("Connection", "keep-alive")
+	req.Header.Add("Pragma", "no-cache")
+	req.Header.Add("Sec-Fetch-Dest", "document")
+	req.Header.Add("Sec-Fetch-Mode", "navigate")
+	req.Header.Add("Sec-Fetch-Site", "none")
+	req.Header.Add("Sec-Fetch-User", "?1")
+	req.Header.Add("Upgrade-Insecure-Requests", "1")
+	req.Header.Add("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
+	req.Header.Add("sec-ch-ua", "\"Not)A;Brand\";v=\"8\", \"Chromium\";v=\"138\", \"Google Chrome\";v=\"138\"")
+	req.Header.Add("sec-ch-ua-mobile", "?0")
+	req.Header.Add("sec-ch-ua-platform", "\"macOS\"")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Contains(data, []byte("系统发现您的网络异常")) {
+		return nil, errors.New("网络异常")
+	}
+	return data, nil
 }
 func getLanRealDownFromBody(domain string, respBody []byte) (string, error) {
 

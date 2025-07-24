@@ -10,18 +10,21 @@ import (
 )
 
 func client() *Client {
-	domain := "https://pc.woozooo.com/"
-	cookie := "set cookie"
-	c, err := NewClient(domain, cookie)
+	c, err := NewClient()
 	if err != nil {
-		log.Panic(err)
+		panic(err)
+	}
+	ckStr := ""
+	err = c.SetCookie(ckStr)
+	if err != nil {
+		panic(err)
 	}
 	return c
 }
 func TestReadDir(t *testing.T) {
 	c := client()
 	resp, err := c.ReadSubDir(ReadSubDirReq{
-		DirId: -1,
+		DirId: "-1",
 	})
 	require.Equal(t, nil, err)
 	require.Equal(t, 1, resp.Zt)
@@ -40,17 +43,18 @@ func TestReadFile(t *testing.T) {
 func TestMkdir(t *testing.T) {
 	c := client()
 	resp, err := c.Mkdir(MkdirReq{
-		ParentId:          -1,
+		ParentId:          "-1",
 		FolderName:        strconv.FormatInt(time.Now().Unix(), 10),
 		FolderDescription: "lmqwleqw",
 	})
+	log.Println(resp, err)
 	require.Equal(t, nil, err)
 	require.Equal(t, int64(1), resp.Zt)
 	t.Logf("resp:%+v\n", resp)
 }
 func TestUpload(t *testing.T) {
 	c := client()
-	resp, err := c.UploadFile("C:\\Users\\yeyud\\Downloads\\tlyh.flac", -1)
+	resp, err := c.UploadFile("C:\\Users\\yeyud\\Downloads\\tlyh.flac", "-1")
 	require.Equal(t, nil, err)
 	require.Equal(t, 1, resp.Zt)
 	t.Logf("resp:%+v\n", resp)
@@ -73,7 +77,7 @@ func TestDownInfo(t *testing.T) {
 }
 func TestUploadReader(t *testing.T) {
 	c := client()
-	resp, err := c.UploadFileFromReader(strings.NewReader("123123123"), "aaa.txt", -1)
+	resp, err := c.UploadFileFromReader(strings.NewReader("123123123"), "aaa.txt", "-1")
 	require.Equal(t, nil, err)
 	require.Equal(t, 1, resp.Zt)
 	t.Logf("resp:%+v\n", resp)
